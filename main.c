@@ -1,4 +1,7 @@
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "ds.h"
 
 typedef enum make_token_kind {
@@ -339,7 +342,53 @@ defer:
     return result;
 }
 
+static void execute_command(ds_string_slice command) {
+    pid_t pid;
+    int status = 0;
+    pid = fork();
+
+    if (pid == 0) {
+        char *cmd = NULL;
+
+        ds_dynamic_array args = {0};
+        ds_dynamic_array_init(&args, sizeof(char *));
+
+        ds_string_slice token = {0};
+        while (ds_string_slice_tokenize(&command, ' ', &token) == 0) {
+            char *buffer = NULL;
+            DS_UNREACHABLE(ds_string_slice_to_owned(&token, &buffer));
+
+            if (cmd == NULL) cmd = buffer;
+            DS_UNREACHABLE(ds_dynamic_array_append(&args, &buffer));
+        }
+
+        char **argv = args.items;
+        argv[args.count] = NULL;
+
+        if (execvp(cmd, argv) == -1) {
+            DS_PANIC("execvp");
+        }
+    } else if (pid > 0) {
+        if (waitpid(pid, &status, 0) == -1) {
+            DS_PANIC("waitpid");
+        }
+    } else {
+        DS_PANIC("fork");
+    }
+}
+
 static void make_plan_dfs(make_file make, make_rule rule) {
+    struct stat statbuf;
+
+    char *pathname = NULL;
+    DS_UNREACHABLE(ds_string_slice_to_owned(&rule.target, &pathname));
+
+    int target_time = 0;
+    if (stat(pathname, &statbuf) == 0) {
+        target_time = statbuf.st_mtim.tv_sec;
+    }
+
+    bool target_newer = true;
     for (unsigned int i = 0; i < rule.deps.count; i++) {
         ds_string_slice dep = {0};
         DS_UNREACHABLE(ds_dynamic_array_get(&rule.deps, i, &dep));
@@ -356,12 +405,25 @@ static void make_plan_dfs(make_file make, make_rule rule) {
 
         if (found) {
             make_plan_dfs(make, dep_rule);
-        } else {
-            printf("file %.*s\n", dep.len, dep.str);
+        }
+
+        char *pathname = NULL;
+        DS_UNREACHABLE(ds_string_slice_to_owned(&dep, &pathname));
+
+        int dep_time = 0;
+        if (stat(pathname, &statbuf) == 0) {
+            dep_time = statbuf.st_mtim.tv_sec;
+        }
+
+        if (dep_time > target_time) {
+            target_newer = false;
         }
     }
 
-    printf("run %.*s: %.*s\n", rule.target.len, rule.target.str, rule.cmd.len, rule.cmd.str);
+    if (!target_newer) {
+        DS_LOG_INFO("run %.*s: %.*s", rule.target.len, rule.target.str, rule.cmd.len, rule.cmd.str);
+        execute_command(rule.cmd);
+    }
 }
 
 static void make_plan(make_file make) {
