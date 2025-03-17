@@ -8,6 +8,7 @@ It even uses itself :)
 
 ```bash
 make
+./main test
 ```
 
 ### Example Syntax
